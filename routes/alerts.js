@@ -240,6 +240,63 @@ router.get('/statistics/summary', (req, res) => {
   }
 });
 
+router.get('/statistics/overview', (req, res) => {
+  try {
+    const { range = 'today', start_time, end_time } = req.query;
+    const overview = AlertModel.getSituationOverview({ range, start_time, end_time });
+
+    overview.by_level = overview.by_level.map(r => ({
+      ...r,
+      level_name: LEVEL_NAMES[r.alert_level] || r.alert_level
+    }));
+    const statusLabelMap = {
+      pending: '待处理', notified: '已通知', processing: '处理中',
+      verified_normal: '核实正常', plan_activated: '已启动预案',
+      false_alarm: '误报', closed: '已办结'
+    };
+    overview.by_status = overview.by_status.map(r => ({
+      ...r,
+      status_label: statusLabelMap[r.status] || r.status
+    }));
+    res.json({ code: 0, message: 'success', data: overview });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ code: 500, message: e.message });
+  }
+});
+
+router.get('/statistics/department-dashboard', (req, res) => {
+  try {
+    const dashboard = AlertModel.getDepartmentDashboard();
+    const statusLabelMap = {
+      pending: '待处理', notified: '已通知', processing: '处理中',
+      verified_normal: '核实正常', plan_activated: '已启动预案',
+      false_alarm: '误报', closed: '已办结'
+    };
+    const callbackLabelMap = {
+      contacted: '已联系', onsite: '已到场', normal: '现场正常',
+      plan: '启动预案', escalated: '已升级', false_alarm: '误报', closed: '已办结'
+    };
+    for (const d of dashboard.departments) {
+      d.status_counts_labeled = {};
+      for (const k of Object.keys(d.status_counts)) {
+        d.status_counts_labeled[statusLabelMap[k] || k] = d.status_counts[k];
+      }
+      for (const a of d.latest_alerts) {
+        a.status_label = statusLabelMap[a.status] || a.status;
+        a.alert_level_name = LEVEL_NAMES[a.alert_level] || a.alert_level;
+        if (a.last_callback_status) {
+          a.last_callback_status_label = callbackLabelMap[a.last_callback_status] || a.last_callback_status;
+        }
+      }
+    }
+    res.json({ code: 0, message: 'success', data: dashboard });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ code: 500, message: e.message });
+  }
+});
+
 router.get('/:id(\\d+)', (req, res) => {
   try {
     const alert = AlertModel.getById(parseInt(req.params.id, 10));

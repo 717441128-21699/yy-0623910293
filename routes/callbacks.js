@@ -72,7 +72,7 @@ router.post('/', (req, res) => {
       let minutes = 60;
       try {
         const rule = alert.rule_id ? RuleModel.getById(alert.rule_id) : null;
-        if (rule && rule.suppress_minutes) minutes = rule.suppress_minutes;
+        if (rule && (rule.suppress_minutes !== undefined && rule.suppress_minutes !== null)) minutes = rule.suppress_minutes;
       } catch (e) {}
       AlertModel.setSuppressUntil(alert.id, minutes);
     }
@@ -87,7 +87,7 @@ router.post('/', (req, res) => {
         previous_alert_status: ALERT_STATUS_OPTIONS.find(s => s.value === alert.status)?.label,
         new_alert_status: ALERT_STATUS_OPTIONS.find(s => s.value === statusConfig.target_alert_status)?.value,
         avoid_duplicate_push: !!statusConfig.avoid_duplicate_push,
-        suppress_minutes: statusConfig.set_suppress ? (alert.rule_id && RuleModel.getById(alert.rule_id)?.suppress_minutes) || 60 : null,
+        suppress_minutes: statusConfig.set_suppress ? (alert.rule_id && (RuleModel.getById(alert.rule_id)?.suppress_minutes !== undefined && RuleModel.getById(alert.rule_id)?.suppress_minutes !== null)) ? RuleModel.getById(alert.rule_id).suppress_minutes : 60 : null,
         message: statusConfig.avoid_duplicate_push ? '已标记避免重复催办' : '已记录，后续仍可能继续推送提醒'
       }
     });

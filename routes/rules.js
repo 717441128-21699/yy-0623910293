@@ -58,7 +58,7 @@ router.post('/', (req, res) => {
       threshold_minutes: threshold_minutes || 10,
       verify_action: verify_action || null,
       status: status !== undefined ? status : 1,
-      suppress_minutes: suppress_minutes || 60
+      suppress_minutes: (suppress_minutes === undefined || suppress_minutes === null) ? 60 : suppress_minutes
     });
     res.status(201).json({ code: 0, message: '创建成功', data: created });
   } catch (e) {

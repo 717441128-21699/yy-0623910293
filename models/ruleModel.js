@@ -54,7 +54,7 @@ class RuleModel {
       $threshold_minutes: data.threshold_minutes || 10,
       $verify_action: data.verify_action || null,
       $status: data.status !== undefined ? data.status : 1,
-      $suppress_minutes: data.suppress_minutes || 60
+      $suppress_minutes: (data.suppress_minutes === undefined || data.suppress_minutes === null) ? 60 : data.suppress_minutes
     });
     saveDatabase();
     return this.getById(getLastInsertId());

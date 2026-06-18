@@ -35,7 +35,7 @@ async function dryRunRules(message) {
       dry_run_missing: Math.max(0, thresholdCount - 1),
       would_trigger_now: thresholdCount <= 1,
       verify_action: rule.verify_action,
-      suppress_minutes: rule.suppress_minutes || 60
+      suppress_minutes: rule.suppress_minutes === undefined || rule.suppress_minutes === null ? 60 : rule.suppress_minutes
     });
   }
   var predictedLevel = null;
@@ -85,7 +85,7 @@ async function processMessage(message, pushHook, options) {
 
     var thresholdCount = rule.threshold_count || 1;
     var thresholdMinutes = rule.threshold_minutes || 10;
-    var suppressMinutes = rule.suppress_minutes || 60;
+    var suppressMinutes = (rule.suppress_minutes === undefined || rule.suppress_minutes === null) ? 60 : rule.suppress_minutes;
     var exactMatch = rule.combine_logic === 'and';
     var actualCount = RawMessageModel.countByKeywords(rule.keywords, thresholdMinutes, exactMatch);
 
@@ -105,7 +105,10 @@ async function processMessage(message, pushHook, options) {
       continue;
     }
 
-    var suppressed = AlertModel.findSuppressedByRuleDeptLocation(rule.id, rule.department, suspectedLoc, suppressMinutes);
+    var suppressed = null;
+    if (suppressMinutes > 0) {
+      suppressed = AlertModel.findSuppressedByRuleDeptLocation(rule.id, rule.department, suspectedLoc, suppressMinutes);
+    }
     if (suppressed) {
       triggerDetails.push({
         rule_id: rule.id,

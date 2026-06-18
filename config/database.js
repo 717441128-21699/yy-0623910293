@@ -8,6 +8,7 @@ let dbInstance = null;
 let SQL = null;
 let saveTimer = null;
 let dirty = false;
+let _lastInsertId = null;
 
 function markDirty() {
   dirty = true;
@@ -128,12 +129,17 @@ function execRun(sql, params = {}) {
   const prepared = db.prepare(sql);
   try {
     prepared.run(cleanParams);
+    markDirty();
+    // Capture last_insert_rowid() immediately after the run while the statement context is fresh
+    const idRows = db.exec('SELECT last_insert_rowid() AS id');
+    _lastInsertId = idRows && idRows[0] && idRows[0].values && idRows[0].values[0] ? idRows[0].values[0][0] : null;
   } finally {
     prepared.free();
   }
 }
 
 function getLastInsertId() {
+  if (_lastInsertId !== null && _lastInsertId !== undefined) return _lastInsertId;
   const db = getDb();
   const rows = db.exec('SELECT last_insert_rowid() AS id');
   return rows && rows[0] && rows[0].values && rows[0].values[0] ? rows[0].values[0][0] : null;

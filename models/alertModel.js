@@ -251,6 +251,173 @@ class AlertModel {
     saveDatabase();
     return getLastInsertId();
   }
+
+  static getSituationOverview({ range = 'today', start_time, end_time } = {}) {
+    ensureSchema();
+    const now = new Date();
+    let fromStr, toStr;
+    if (range === '24h') {
+      fromStr = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').substring(0, 19);
+      toStr = now.toISOString().replace('T', ' ').substring(0, 19);
+    } else if (range === 'custom' && start_time && end_time) {
+      fromStr = String(start_time).replace('T', ' ').substring(0, 19);
+      toStr = String(end_time).replace('T', ' ').substring(0, 19);
+    } else {
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      fromStr = todayStart.toISOString().replace('T', ' ').substring(0, 19);
+      toStr = now.toISOString().replace('T', ' ').substring(0, 19);
+    }
+
+    const params = { $from: fromStr, $to: toStr };
+    const where = `WHERE first_seen_at >= $from AND first_seen_at <= $to`;
+
+    const totalRow = queryOne(`SELECT COUNT(*) as total FROM alerts ${where}`, params);
+
+    const byLevel = queryAll(`
+      SELECT alert_level, COUNT(*) as count
+      FROM alerts ${where}
+      GROUP BY alert_level
+    `, params);
+
+    const byStatus = queryAll(`
+      SELECT status, COUNT(*) as count
+      FROM alerts ${where}
+      GROUP BY status
+    `, params);
+
+    const bySource = queryAll(`
+      SELECT source_platform, COUNT(*) as count
+      FROM alerts ${where}
+      GROUP BY source_platform
+    `, params);
+
+    const byDepartment = queryAll(`
+      SELECT department, COUNT(*) as count,
+             SUM(CASE WHEN status IN ('pending','notified','processing') THEN 1 ELSE 0 END) as pending_count
+      FROM alerts ${where}
+      GROUP BY department
+      ORDER BY pending_count DESC, count DESC
+    `, params);
+
+    const pushStats = queryOne(`
+      SELECT
+        (SELECT COUNT(*) FROM push_logs pl
+          JOIN alerts a ON a.id = pl.alert_id
+          WHERE a.first_seen_at >= $from AND a.first_seen_at <= $to) as push_total,
+        (SELECT COUNT(*) FROM push_logs pl
+          JOIN alerts a ON a.id = pl.alert_id
+          WHERE a.first_seen_at >= $from AND a.first_seen_at <= $to AND pl.status='success') as push_success,
+        (SELECT COUNT(*) FROM push_logs pl
+          JOIN alerts a ON a.id = pl.alert_id
+          WHERE a.first_seen_at >= $from AND a.first_seen_at <= $to AND pl.status='failed') as push_failed
+    `, params) || { push_total: 0, push_success: 0, push_failed: 0 };
+
+    const unclosedDepartments = byDepartment
+      .filter(d => (d.pending_count || 0) > 0)
+      .map(d => ({ department: d.department, pending_count: d.pending_count, total_count: d.count }));
+
+    return {
+      range,
+      time_window: { start: fromStr, end: toStr },
+      total_alerts: totalRow ? totalRow.total : 0,
+      push_success_rate: pushStats.push_total > 0
+        ? Math.round((pushStats.push_success / pushStats.push_total) * 10000) / 100
+        : 100,
+      push_stats: {
+        total: pushStats.push_total || 0,
+        success: pushStats.push_success || 0,
+        failed: pushStats.push_failed || 0
+      },
+      by_level: byLevel,
+      by_status: byStatus,
+      by_source: bySource,
+      by_department: byDepartment,
+      unclosed_departments: unclosedDepartments
+    };
+  }
+
+  static getDepartmentDashboard() {
+    ensureSchema();
+    const alerts = queryAll(`
+      SELECT a.*, r.rule_name, r.suppress_minutes as rule_suppress_minutes,
+             (SELECT MAX(callback_time) FROM callbacks c WHERE c.alert_id = a.id) as last_callback_time,
+             (SELECT callback_status FROM callbacks c WHERE c.alert_id = a.id ORDER BY callback_time DESC LIMIT 1) as last_callback_status,
+             (SELECT operator FROM callbacks c WHERE c.alert_id = a.id ORDER BY callback_time DESC LIMIT 1) as last_callback_operator,
+             (SELECT callback_remark FROM callbacks c WHERE c.alert_id = a.id ORDER BY callback_time DESC LIMIT 1) as last_callback_remark,
+             (SELECT status FROM push_logs pl WHERE pl.alert_id = a.id ORDER BY pushed_at DESC LIMIT 1) as last_push_status,
+             (SELECT error_message FROM push_logs pl WHERE pl.alert_id = a.id ORDER BY pushed_at DESC LIMIT 1) as last_push_error,
+             (SELECT pushed_at FROM push_logs pl WHERE pl.alert_id = a.id ORDER BY pushed_at DESC LIMIT 1) as last_push_at
+      FROM alerts a
+      LEFT JOIN rules r ON a.rule_id = r.id
+      WHERE a.status IN ('pending','notified','processing','plan_activated','verified_normal','false_alarm','closed')
+      ORDER BY a.last_updated_at DESC
+    `, {});
+
+    const deptMap = {};
+    for (const a of alerts) {
+      const dept = a.department || '未指派';
+      if (!deptMap[dept]) {
+        deptMap[dept] = {
+          department: dept,
+          total_count: 0,
+          status_counts: {
+            pending: 0, notified: 0, processing: 0,
+            plan_activated: 0, verified_normal: 0,
+            false_alarm: 0, closed: 0
+          },
+          latest_alerts: []
+        };
+      }
+      const item = deptMap[dept];
+      item.total_count++;
+      if (item.status_counts[a.status] !== undefined) item.status_counts[a.status]++;
+
+      const nextNudgeMinutes = (a.rule_suppress_minutes === undefined || a.rule_suppress_minutes === null) ? 60 : a.rule_suppress_minutes;
+      const baseTime = a.last_notified_at || a.first_seen_at;
+      let nextNudgeAt = null;
+      if (baseTime && nextNudgeMinutes > 0 && !a.suppress_until) {
+        const bt = new Date(String(baseTime).replace(' ', 'T'));
+        nextNudgeAt = new Date(bt.getTime() + nextNudgeMinutes * 60 * 1000).toISOString().replace('T', ' ').substring(0, 19);
+      }
+      if (a.suppress_until) {
+        nextNudgeAt = String(a.suppress_until).substring(0, 19);
+      }
+
+      item.latest_alerts.push({
+        id: a.id,
+        alert_uuid: a.alert_uuid,
+        rule_name: a.rule_name,
+        alert_level: a.alert_level,
+        status: a.status,
+        matched_count: a.matched_count,
+        suspected_location: a.suspected_location,
+        last_callback_time: a.last_callback_time,
+        last_callback_status: a.last_callback_status,
+        last_callback_operator: a.last_callback_operator,
+        last_callback_remark: a.last_callback_remark,
+        last_push_status: a.last_push_status,
+        last_push_error: a.last_push_error,
+        last_push_at: a.last_push_at,
+        next_nudge_at: nextNudgeAt,
+        suppress_until: a.suppress_until,
+        reopen_count: a.reopen_count || 0,
+        first_seen_at: a.first_seen_at
+      });
+    }
+
+    const list = Object.values(deptMap).map(d => {
+      d.unclosed_count = d.status_counts.pending + d.status_counts.notified + d.status_counts.processing + d.status_counts.plan_activated;
+      d.closed_count = d.status_counts.verified_normal + d.status_counts.false_alarm + d.status_counts.closed;
+      d.latest_alerts = d.latest_alerts.slice(0, 20);
+      return d;
+    }).sort((a, b) => b.unclosed_count - a.unclosed_count);
+
+    return {
+      total_departments: list.length,
+      total_unclosed: list.reduce((s, d) => s + d.unclosed_count, 0),
+      departments: list
+    };
+  }
 }
 
 module.exports = AlertModel;

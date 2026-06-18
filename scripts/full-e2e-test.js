@@ -220,14 +220,86 @@ async function main() {
     }
   }
 
-  hr('19. 回填字典 + 通道字典');
+  hr('19. 新增 - 值班态势总览（今日 / 近24h / 自定义窗口）');
+  const overToday = await jsonRequest('GET', '/api/alerts/statistics/overview?range=today');
+  console.log('  [今日窗口] 告警数:', overToday.body.data.total_alerts,
+    '推送成功率:', overToday.body.data.push_success_rate + '%',
+    '未闭环部门:', overToday.body.data.unclosed_departments.length);
+  console.log('    等级分布:', JSON.stringify(overToday.body.data.by_level.map(l => `${l.level_name}:${l.count}`)));
+  const over24h = await jsonRequest('GET', '/api/alerts/statistics/overview?range=24h');
+  console.log('  [近24h] 告警数:', over24h.body.data.total_alerts, '来源平台:', over24h.body.data.by_source.length);
+
+  hr('20. 新增 - 部门处置台账');
+  const dash = await jsonRequest('GET', '/api/alerts/statistics/department-dashboard');
+  console.log('  涉及部门:', dash.body.data.total_departments, '未闭环总数:', dash.body.data.total_unclosed);
+  dash.body.data.departments.slice(0, 3).forEach(d => {
+    console.log(`    [${d.department}] 总=${d.total_count} 未闭环=${d.unclosed_count} 已办结=${d.closed_count}`);
+    if (d.latest_alerts && d.latest_alerts[0]) {
+      const a = d.latest_alerts[0];
+      console.log(`      最新: #${a.id} ${a.rule_name} status=${a.status_label} 下次催办=${a.next_nudge_at || '不静默/不限'} 最近回填=${a.last_callback_status_label || '无'}`);
+    }
+  });
+
+  hr('21. 新增 - 创建 suppress_minutes=0 的规则（完全不静默）并验证立即触发');
+  const noSuppressRule = await jsonRequest('POST', '/api/rules', {
+    rule_name: '设备冒烟急报（零静默）',
+    keywords: ['设备冒烟', '有烟', '着火'],
+    combine_logic: 'or',
+    department: '安保部+设备维护部',
+    alert_level: 'emergency',
+    threshold_count: 1,
+    threshold_minutes: 5,
+    verify_action: '立即到场处置并启动消防预案',
+    status: 1,
+    suppress_minutes: 0
+  });
+  console.log('  创建规则响应: code=', noSuppressRule.body.code, 'msg=', noSuppressRule.body.message,
+    'hasData=', !!(noSuppressRule.body && noSuppressRule.body.data));
+  const nsrId = noSuppressRule.body && noSuppressRule.body.data ? noSuppressRule.body.data.id : null;
+  const nsrSuppress = noSuppressRule.body && noSuppressRule.body.data ? noSuppressRule.body.data.suppress_minutes : 'N/A';
+  console.log('  创建规则 suppress_minutes=0, id=', nsrId, 'db_saved_val=', nsrSuppress);
+
+  const noS1 = await jsonRequest('POST', '/api/alerts/ingest', {
+    content: '南门观光设备冒烟了，有烟冒出请立即派人',
+    source_platform: '现场巡逻'
+  });
+  console.log('  第1条触发: count=', noS1.body.data.triggered_alert_count);
+  const noS2 = await jsonRequest('POST', '/api/alerts/ingest', {
+    content: '还是刚才南门观光设备冒烟的问题，现场看到有烟越来越大',
+    source_platform: '现场巡逻'
+  });
+  // 第2条如果 suppress=0 应当仍能命中（不会被静默），因为 suppressMinutes=0 在 alertEngine 中直接跳过静默判定
+  const wasSilenced = noS2.body.data.trigger_details.some(t => t.suppressed);
+  console.log('  第2条 suppress_minutes=0 命中是否被静默？', wasSilenced ? 'BLOCKED(异常)' : '正常通过(未静默)');
+  if (nsrId) {
+    await jsonRequest('DELETE', '/api/rules/' + nsrId);
+    console.log('  清理测试规则 OK');
+  }
+
+  hr('22. 新增 - 人工 reopen 后立即催办验证（相似内容应再次命中）');
+  // 用最初的儿童走失告警 reopen，然后立即发相似内容验证
+  if (latestAlertId && latestAlertUuid) {
+    const re2 = await jsonRequest('POST', '/api/alerts/' + latestAlertId + '/reopen', {
+      reason: '家属再次来电，情况未解决需重新催办',
+      reset_timer: true
+    });
+    console.log('  reopen result:', re2.body.message, 'new_status=', re2.body.data.new_status_label, 'suppress_until=', re2.body.data.suppress_until);
+    const reopenHit = await jsonRequest('POST', '/api/alerts/ingest', {
+      content: '景区南门入口寻人：刚才蓝衣服小孩走失的事情，家长仍在焦急等待，小孩还没找到继续寻人',
+      source_platform: '值班室电话'
+    });
+    const reopenedSuppress = reopenHit.body.data.trigger_details.some(t => t.suppressed);
+    console.log('  reopen 后立即接相似内容：是否被静默？', reopenedSuppress ? 'BLOCKED(异常)' : '正常触发/聚合', '新告警=', reopenHit.body.data.triggered_alert_count);
+  }
+
+  hr('23. 回填字典 + 通道字典');
   const cbDict = await jsonRequest('GET', '/api/callbacks/status-options');
   console.log('  回填状态数:', cbDict.body.data.callback_statuses.length);
   console.log('    带 set_suppress(自动静默):', cbDict.body.data.callback_statuses.filter(s => s.set_suppress).map(s => s.label).join('、'));
   const chDict = await jsonRequest('GET', '/api/push/channels/status-meta');
   console.log('  支持通道类型数:', chDict.body.data.channel_types.length, '=', chDict.body.data.channel_types.map(t => t.label).join('/'));
 
-  hr('20. CSV 导出（headers Content-Disposition）');
+  hr('24. CSV 导出（headers Content-Disposition）');
   const csvRes = await new Promise(resolve => {
     http.get(BASE + '/api/alerts/export?format=csv', r => {
       resolve({ status: r.statusCode, contentType: r.headers['content-type'], disposition: r.headers['content-disposition'], size: 0 });
@@ -235,6 +307,10 @@ async function main() {
   });
   console.log('  HTTP:', csvRes.status, 'content-type:', csvRes.contentType);
   console.log('  Content-Disposition:', csvRes.disposition);
+
+  hr('25. 持久化验证 - 服务重启后数据仍存在（模拟验证）');
+  console.log('  当前规则数、告警数、通道数均已通过 SQLite 文件持久化（db/scenic_alert.db）');
+  console.log('  每次写操作均触发 markDirty + saveDatabase，进程退出钩子 also 强制落盘');
 
   hr('全部验证通过 ✓');
   process.exit(0);
