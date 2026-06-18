@@ -3,12 +3,13 @@ const { queryOne, queryAll, execRun, getLastInsertId, saveDatabase } = require('
 class RawMessageModel {
   static create(data) {
     execRun(`
-      INSERT INTO raw_messages (content, source_platform, suspected_location)
-      VALUES ($content, $source_platform, $suspected_location)
+      INSERT INTO raw_messages (content, source_platform, sender, meta_json)
+      VALUES ($content, $source_platform, $sender, $meta_json)
     `, {
       $content: data.content,
       $source_platform: data.source_platform || null,
-      $suspected_location: data.suspected_location || null
+      $sender: data.sender || null,
+      $meta_json: typeof data.meta_json === 'string' ? data.meta_json : (data.meta_json ? JSON.stringify(data.meta_json) : null)
     });
     saveDatabase();
     return getLastInsertId();

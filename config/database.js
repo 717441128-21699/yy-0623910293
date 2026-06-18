@@ -89,9 +89,18 @@ function queryOne(stmt, params = {}) {
   const cleanParams = sanitizeParams(params);
   const prepared = typeof stmt === 'string' ? getDb().prepare(stmt) : stmt;
   try {
-    const row = prepared.getAsObject(cleanParams);
-    return row && Object.keys(row).length > 0 ? row : null;
+    prepared.bind(cleanParams);
+    if (!prepared.step()) {
+      return null;
+    }
+    const row = prepared.getAsObject();
+    if (!row) return null;
+    const values = Object.values(row);
+    if (values.length === 0) return null;
+    const allUndefined = values.every(function (v) { return v === undefined || v === null; });
+    return allUndefined ? null : row;
   } finally {
+    prepared.reset();
     if (typeof stmt === 'string') prepared.free();
   }
 }
@@ -136,6 +145,36 @@ function getChangesCount() {
   return rows && rows[0] && rows[0].values && rows[0].values[0] ? rows[0].values[0][0] : 0;
 }
 
+function tableExists(name) {
+  try {
+    const row = queryOne(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name=$name`,
+      { $name: name }
+    );
+    return !!row;
+  } catch (e) { return false; }
+}
+
+function columnExists(tableName, colName) {
+  try {
+    const rows = queryAll(`PRAGMA table_info(${tableName})`);
+    return rows.some(r => String(r.name || r.Name || '').toLowerCase() === String(colName).toLowerCase());
+  } catch (e) { return false; }
+}
+
+function addColumnIfMissing(table, col, definition) {
+  if (!tableExists(table)) return false;
+  if (columnExists(table, col)) return false;
+  try {
+    execRun(`ALTER TABLE ${table} ADD COLUMN ${col} ${definition}`);
+    console.log(`[schema] 已为 ${table} 新增列: ${col}`);
+    return true;
+  } catch (e) {
+    console.warn(`[schema] 新增列失败 ${table}.${col}:`, e.message);
+    return false;
+  }
+}
+
 function closeDb() {
   saveDatabase();
   if (saveTimer) {
@@ -156,4 +195,4 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-module.exports = { initDb, getDb, closeDb, DB_PATH, saveDatabase, queryOne, queryAll, execRun, getLastInsertId, getChangesCount };
+module.exports = { initDb, getDb, closeDb, DB_PATH, saveDatabase, queryOne, queryAll, execRun, getLastInsertId, getChangesCount, tableExists, columnExists, addColumnIfMissing };
