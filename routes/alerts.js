@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { processMessage, dryRunRules, LEVEL_NAMES, buildAlertPushPayload } = require('../middleware/alertEngine');
 const AlertModel = require('../models/alertModel');
+const EscalationModel = require('../models/escalationModel');
 const { queryAll, queryOne } = require('../config/database');
 
 router.post('/ingest', async (req, res) => {
@@ -267,7 +268,8 @@ router.get('/statistics/overview', (req, res) => {
 
 router.get('/statistics/department-dashboard', (req, res) => {
   try {
-    const dashboard = AlertModel.getDepartmentDashboard();
+    const { department, start_time, end_time } = req.query;
+    const dashboard = AlertModel.getDepartmentDashboard({ department, start_time, end_time });
     const statusLabelMap = {
       pending: '待处理', notified: '已通知', processing: '处理中',
       verified_normal: '核实正常', plan_activated: '已启动预案',
@@ -307,13 +309,15 @@ router.get('/:id(\\d+)', (req, res) => {
       failed: (alert.push_logs || []).filter(p => p.status === 'failed').length,
       pending: (alert.push_logs || []).filter(p => p.status === 'pending' || p.status === 'sending').length
     };
+    const escalations = EscalationModel.getByAlert(alert.id);
     res.json({
       code: 0,
       data: {
         ...alert,
         level_name: LEVEL_NAMES[alert.alert_level] || alert.alert_level,
         push_stats: pushStats,
-        push_payload_template: buildAlertPushPayload(alert)
+        push_payload_template: buildAlertPushPayload(alert),
+        escalations: escalations
       }
     });
   } catch (e) {
@@ -332,12 +336,14 @@ router.get('/uuid/:uuid', (req, res) => {
       failed: (alert.push_logs || []).filter(p => p.status === 'failed').length,
       pending: (alert.push_logs || []).filter(p => p.status === 'pending' || p.status === 'sending').length
     };
+    const escalations = EscalationModel.getByAlert(alert.id);
     res.json({
       code: 0,
       data: {
         ...alert,
         level_name: LEVEL_NAMES[alert.alert_level] || alert.alert_level,
-        push_stats: pushStats
+        push_stats: pushStats,
+        escalations: escalations
       }
     });
   } catch (e) {

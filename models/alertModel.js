@@ -293,10 +293,10 @@ class AlertModel {
 
     const byDepartment = queryAll(`
       SELECT department, COUNT(*) as count,
-             SUM(CASE WHEN status IN ('pending','notified','processing') THEN 1 ELSE 0 END) as pending_count
+             SUM(CASE WHEN status IN ('pending','notified','processing','plan_activated') THEN 1 ELSE 0 END) as unclosed_count
       FROM alerts ${where}
       GROUP BY department
-      ORDER BY pending_count DESC, count DESC
+      ORDER BY unclosed_count DESC, count DESC
     `, params);
 
     const pushStats = queryOne(`
@@ -313,8 +313,8 @@ class AlertModel {
     `, params) || { push_total: 0, push_success: 0, push_failed: 0 };
 
     const unclosedDepartments = byDepartment
-      .filter(d => (d.pending_count || 0) > 0)
-      .map(d => ({ department: d.department, pending_count: d.pending_count, total_count: d.count }));
+      .filter(d => (d.unclosed_count || 0) > 0)
+      .map(d => ({ department: d.department, unclosed_count: d.unclosed_count, total_count: d.count }));
 
     return {
       range,
@@ -336,8 +336,24 @@ class AlertModel {
     };
   }
 
-  static getDepartmentDashboard() {
+  static getDepartmentDashboard({ department, start_time, end_time } = {}) {
     ensureSchema();
+    let extraWhere = [];
+    let params = {};
+    if (department) {
+      extraWhere.push('a.department = $department');
+      params.$department = department;
+    }
+    if (start_time) {
+      extraWhere.push('a.first_seen_at >= $start_time');
+      params.$start_time = String(start_time).replace('T', ' ').substring(0, 19);
+    }
+    if (end_time) {
+      extraWhere.push('a.first_seen_at <= $end_time');
+      params.$end_time = String(end_time).replace('T', ' ').substring(0, 19);
+    }
+    const extraSql = extraWhere.length > 0 ? `AND ${extraWhere.join(' AND ')}` : '';
+
     const alerts = queryAll(`
       SELECT a.*, r.rule_name, r.suppress_minutes as rule_suppress_minutes,
              (SELECT MAX(callback_time) FROM callbacks c WHERE c.alert_id = a.id) as last_callback_time,
@@ -350,12 +366,14 @@ class AlertModel {
       FROM alerts a
       LEFT JOIN rules r ON a.rule_id = r.id
       WHERE a.status IN ('pending','notified','processing','plan_activated','verified_normal','false_alarm','closed')
+      ${extraSql}
       ORDER BY a.last_updated_at DESC
-    `, {});
+    `, params);
 
     const deptMap = {};
     for (const a of alerts) {
       const dept = a.department || '未指派';
+      if (department && dept !== department) continue;
       if (!deptMap[dept]) {
         deptMap[dept] = {
           department: dept,
@@ -413,6 +431,7 @@ class AlertModel {
     }).sort((a, b) => b.unclosed_count - a.unclosed_count);
 
     return {
+      filters: { department: department || null, start_time: start_time || null, end_time: end_time || null },
       total_departments: list.length,
       total_unclosed: list.reduce((s, d) => s + d.unclosed_count, 0),
       departments: list

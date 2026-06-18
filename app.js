@@ -8,6 +8,8 @@ const rulesRouter = require('./routes/rules');
 const alertsRouter = require('./routes/alerts');
 const callbacksRouter = require('./routes/callbacks');
 const pushRouter = require('./routes/push');
+const shiftsRouter = require('./routes/shifts');
+const { router: escalationsRouter, runEscalationDaemon } = require('./routes/escalations');
 
 async function createApp() {
   const dbDir = path.join(__dirname, 'db');
@@ -120,6 +122,40 @@ async function createApp() {
         FOREIGN KEY (channel_id) REFERENCES push_channels(id)
       );
     `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS duty_shifts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shift_name TEXT NOT NULL,
+        shift_type TEXT DEFAULT 'morning',
+        handover_person TEXT,
+        successor_person TEXT,
+        start_time DATETIME NOT NULL,
+        end_time DATETIME,
+        handover_at DATETIME,
+        handover_summary TEXT,
+        notes TEXT,
+        status TEXT DEFAULT 'active',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS alert_escalations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alert_id INTEGER,
+        alert_uuid TEXT,
+        from_level TEXT,
+        to_level TEXT,
+        from_channel_type TEXT,
+        to_channel_type TEXT,
+        reason TEXT,
+        escalation_type TEXT DEFAULT 'auto',
+        result_status TEXT DEFAULT 'pending',
+        result_message TEXT,
+        escalated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (alert_id) REFERENCES alerts(id)
+      );
+    `);
     try {
       db.exec(`
         CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
@@ -195,7 +231,7 @@ async function createApp() {
     }
 
     saveDatabase();
-    console.log('[app] 初始化完成：5 表 + 5 规则 + 4 示例推送通道');
+    console.log('[app] 初始化完成：7 表 + 5 规则 + 4 示例推送通道');
   } else {
     addColumnIfMissing('rules', 'suppress_minutes', 'INTEGER DEFAULT 60');
     addColumnIfMissing('alerts', 'suppress_until', 'DATETIME');
@@ -249,6 +285,46 @@ async function createApp() {
       `);
       console.log('[app] 已为旧数据库补齐 push_channels / push_logs 表');
     }
+    if (!tableExists('duty_shifts')) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS duty_shifts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          shift_name TEXT NOT NULL,
+          shift_type TEXT DEFAULT 'morning',
+          handover_person TEXT,
+          successor_person TEXT,
+          start_time DATETIME NOT NULL,
+          end_time DATETIME,
+          handover_at DATETIME,
+          handover_summary TEXT,
+          notes TEXT,
+          status TEXT DEFAULT 'active',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      console.log('[app] 已补齐 duty_shifts 表');
+    }
+    if (!tableExists('alert_escalations')) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS alert_escalations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          alert_id INTEGER,
+          alert_uuid TEXT,
+          from_level TEXT,
+          to_level TEXT,
+          from_channel_type TEXT,
+          to_channel_type TEXT,
+          reason TEXT,
+          escalation_type TEXT DEFAULT 'auto',
+          result_status TEXT DEFAULT 'pending',
+          result_message TEXT,
+          escalated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (alert_id) REFERENCES alerts(id)
+        );
+      `);
+      console.log('[app] 已补齐 alert_escalations 表');
+    }
   }
 
   const app = express();
@@ -268,13 +344,15 @@ async function createApp() {
   app.get('/', (req, res) => {
     res.json({
       name: '景区应急联动中心 - 后端告警服务',
-      version: '1.1.0',
+      version: '1.2.0',
       status: 'running',
       modules: [
         { name: '风险规则管理', prefix: '/api/rules', desc: '含静默窗口 suppress_minutes 配置' },
         { name: '告警记录与接入', prefix: '/api/alerts', desc: '支持试运行 dry-run + 多维筛选/导出 + 重新打开' },
         { name: '告警闭环回填', prefix: '/api/callbacks', desc: '7 种回填状态，自动写静默避免重复催办' },
-        { name: '推送通道管理', prefix: '/api/push', desc: '6 类通道 + 推送日志 + 失败手动重推 + 通道连通性测试' }
+        { name: '推送通道管理', prefix: '/api/push', desc: '6 类通道 + 推送日志 + 失败手动重推 + 通道连通性测试' },
+        { name: '值班班次管理', prefix: '/api/shifts', desc: '早中晚班 + 交班自动摘要 + 接班查上一班事项' },
+        { name: '告警升级链路', prefix: '/api/escalations', desc: '超时未回填自动升级 + 手动升级 + 升级轨迹' }
       ],
       docs: [
         '状态字典: GET /api/callbacks/status-options',
@@ -294,6 +372,8 @@ async function createApp() {
   app.use('/api/alerts', alertsRouter);
   app.use('/api/callbacks', callbacksRouter);
   app.use('/api/push', pushRouter);
+  app.use('/api/shifts', shiftsRouter);
+  app.use('/api/escalations', escalationsRouter);
 
   app.use((err, req, res, next) => {
     console.error('[Unhandled Error]', err && err.stack ? err.stack : err);
@@ -316,9 +396,20 @@ async function createApp() {
     }
   }, 30 * 1000);
 
+  const escalationTimer = setInterval(async () => {
+    try {
+      const r = await runEscalationDaemon(30);
+      if (r.length > 0) {
+        console.log('[escalation-daemon] 自动升级结果:', JSON.stringify(r));
+      }
+    } catch (e) {
+      console.error('[escalation-daemon] 异常:', e.message);
+    }
+  }, 60 * 1000);
+
   const server = app.listen(PORT, () => {
     console.log(`\n===============================================`);
-    console.log(`  景区应急联动告警服务 v1.1.0 已启动`);
+    console.log(`  景区应急联动告警服务 v1.2.0 已启动`);
     console.log(`  服务地址: http://localhost:${PORT}`);
     console.log(`  健康检查: http://localhost:${PORT}/health`);
     console.log(`  规则管理: http://localhost:${PORT}/api/rules`);
@@ -327,13 +418,17 @@ async function createApp() {
     console.log(`  告警导出: GET  http://localhost:${PORT}/api/alerts/export?format=csv`);
     console.log(`  通道管理: http://localhost:${PORT}/api/push/channels`);
     console.log(`  回填字典: http://localhost:${PORT}/api/callbacks/status-options`);
+    console.log(`  班次管理: http://localhost:${PORT}/api/shifts`);
+    console.log(`  告警升级: http://localhost:${PORT}/api/escalations`);
     console.log(`  重试守护: 每 30 秒扫描推送失败日志自动重推`);
+    console.log(`  升级守护: 每 60 秒扫描超时未回填告警自动升级`);
     console.log(`===============================================\n`);
   });
 
   const gracefulShutdown = (signal) => {
     console.log(`\n[${signal}] 正在关闭服务...`);
     clearInterval(retryTimer);
+    clearInterval(escalationTimer);
     try { saveDatabase(); } catch (e) {}
     server.close(() => {
       console.log('服务已关闭');

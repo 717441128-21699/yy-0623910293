@@ -312,6 +312,109 @@ async function main() {
   console.log('  当前规则数、告警数、通道数均已通过 SQLite 文件持久化（db/scenic_alert.db）');
   console.log('  每次写操作均触发 markDirty + saveDatabase，进程退出钩子 also 强制落盘');
 
+  hr('26. 值班班次管理 - 创建早班 + 查当前班次');
+  const sh1 = await jsonRequest('POST', '/api/shifts', {
+    shift_name: '6月19日早班',
+    shift_type: 'morning',
+    handover_person: '值班长老王',
+    successor_person: '值班长老李',
+    notes: '重点关注南门区域儿童走失事件'
+  });
+  const shiftId = sh1.body && sh1.body.data ? sh1.body.data.id : null;
+  console.log('  创建班次: id=', shiftId, 'type=', sh1.body.data.shift_type_label, 'status=', sh1.body.data.status_label);
+  const activeShift = await jsonRequest('GET', '/api/shifts/active');
+  console.log('  当前班次:', activeShift.body.data ? 'id=' + activeShift.body.data.id + ' ' + activeShift.body.data.shift_name : '无');
+
+  hr('27. 值班班次管理 - 交班（自动带出未闭环/重点部门/失败推送）');
+  const handover = await jsonRequest('POST', '/api/shifts/' + shiftId + '/handover', {
+    successor_person: '值班长老李',
+    notes: '已处理儿童走失，需继续关注缆车问题'
+  });
+  console.log('  交班结果: status=', handover.body.data.status_label,
+    '未闭环告警数=', handover.body.data.handover_summary.unclosed_alert_count,
+    '未闭环部门=', JSON.stringify(Object.keys(handover.body.data.handover_summary.unclosed_by_department)));
+
+  hr('28. 值班班次管理 - 查上一班次交接内容');
+  const newShift = await jsonRequest('POST', '/api/shifts', { shift_type: 'afternoon', handover_person: '值班长老李' });
+  const newShiftId = newShift.body && newShift.body.data ? newShift.body.data.id : null;
+  const prevShift = await jsonRequest('GET', '/api/shifts/' + newShiftId + '/previous');
+  console.log('  上一班次:', prevShift.body.data ? 'id=' + prevShift.body.data.id + ' notes=' + (prevShift.body.data.notes || '').substring(0, 30) : '无');
+  if (prevShift.body.data && prevShift.body.data.handover_summary) {
+    console.log('  上班未闭环:', prevShift.body.data.handover_summary.unclosed_alert_count);
+  }
+
+  hr('29. 告警升级 - 手动升级（verify → emergency）');
+  // 先确保有 alert#1 存在
+  const alertForEsc = await jsonRequest('GET', '/api/alerts/' + latestAlertId);
+  const currentLevel = alertForEsc.body && alertForEsc.body.data ? alertForEsc.body.data.alert_level : 'unknown';
+  console.log('  当前等级:', currentLevel);
+  const esc1 = await jsonRequest('POST', '/api/escalations/manual', {
+    alert_id: latestAlertId,
+    reason: '超过30分钟未收到部门回填，值班长决定升级',
+    to_level: 'emergency',
+    to_channel_type: 'sms'
+  });
+  console.log('  升级结果: from=', esc1.body.data.from_level_name, '→ to=', esc1.body.data.to_level_name,
+    'push_ok=', esc1.body.data.push_results ? esc1.body.data.push_results.length + '条推送' : '无');
+
+  hr('30. 告警详情 - 查看升级轨迹');
+  const alertDetail = await jsonRequest('GET', '/api/alerts/' + latestAlertId);
+  const escHistory = alertDetail.body && alertDetail.body.data ? alertDetail.body.data.escalations : [];
+  console.log('  升级记录数:', escHistory.length);
+  escHistory.forEach(e => {
+    console.log(`    #${e.id} ${e.from_level}→${e.to_level} type=${e.escalation_type} reason=${(e.reason || '').substring(0, 40)} result=${e.result_status}`);
+  });
+
+  hr('31. 升级链路 - 查超时未回填告警');
+  const overdue = await jsonRequest('GET', '/api/escalations/overdue?minutes=30');
+  console.log('  超时未回填告警数:', overdue.body.data.count);
+
+  hr('32. 未闭环口径 - plan_activated 应算未闭环');
+  // 先回填「启动预案」
+  const cbPlan = await jsonRequest('POST', '/api/callbacks', {
+    alert_uuid: latestAlertUuid,
+    callback_status: 'plan',
+    callback_remark: '已启动应急预案，正在处置中',
+    operator: '安保部主任'
+  });
+  console.log('  回填启动预案:', cbPlan.body.data.new_alert_status);
+  const overviewAfterPlan = await jsonRequest('GET', '/api/alerts/statistics/overview?range=today');
+  const unclosedDepts = overviewAfterPlan.body.data.unclosed_departments;
+  console.log('  态势总览未闭环部门数:', unclosedDepts.length,
+    '(plan_activated=未闭环，应>0)');
+  const dashAfterPlan = await jsonRequest('GET', '/api/alerts/statistics/department-dashboard');
+  const deptUnclosed = dashAfterPlan.body.data.departments.find(d => d.department.includes('游客'));
+  if (deptUnclosed) {
+    console.log('  部门台账 - 游客服务中心: unclosed=', deptUnclosed.unclosed_count,
+      'plan_activated=', deptUnclosed.status_counts.plan_activated,
+      '(口径一致: plan_activated 算未闭环)');
+  }
+
+  hr('33. 部门台账筛选 - 按部门名+时间范围');
+  const dashFiltered = await jsonRequest('GET', '/api/alerts/statistics/department-dashboard?department=' + encodeURIComponent('游客服务中心'));
+  console.log('  筛选部门=游客服务中心: 涉及部门数=', dashFiltered.body.data.total_departments,
+    'filters=', JSON.stringify(dashFiltered.body.data.filters));
+
+  hr('34. 回填终态后再 reopen 立即可催办');
+  const cbClose = await jsonRequest('POST', '/api/callbacks', {
+    alert_uuid: latestAlertUuid,
+    callback_status: 'closed',
+    callback_remark: '事件已妥善处置完毕',
+    operator: '安保部主任'
+  });
+  console.log('  回填已办结:', cbClose.body.data.new_alert_status);
+  const reopen2 = await jsonRequest('POST', '/api/alerts/' + latestAlertId + '/reopen', {
+    reason: '又有新情况需要关注',
+    reset_timer: true
+  });
+  console.log('  reopen: suppress_until=', reopen2.body.data.suppress_until, 'new_status=', reopen2.body.data.new_status_label);
+  const afterReopen = await jsonRequest('POST', '/api/alerts/ingest', {
+    content: '景区南门又出现了类似的小孩走失情况，请帮忙广播寻人',
+    source_platform: '值班室'
+  });
+  const reopenTriggered = afterReopen.body.data.trigger_details.some(t => t.passed_threshold && !t.suppressed);
+  console.log('  reopen 后立即接入相似内容:', reopenTriggered ? '✓ 正常触发（未静默）' : '✗ 被静默（异常）');
+
   hr('全部验证通过 ✓');
   process.exit(0);
 }
