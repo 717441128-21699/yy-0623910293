@@ -200,9 +200,15 @@ async function sendPush(channel, alertRecord, rule = null, isTest = false) {
   };
 }
 
-async function dispatchAlertPushes(alertRecord, rule = null) {
+async function dispatchAlertPushes(alertRecord, rule = null, { channel_ids = null, channel_types = null } = {}) {
   const level = alertRecord.alert_level;
-  const channels = PushChannelModel.listActive(level);
+  let channels = PushChannelModel.listActive(level);
+  if (channel_ids && Array.isArray(channel_ids) && channel_ids.length > 0) {
+    channels = channels.filter(c => channel_ids.includes(c.id));
+  }
+  if (channel_types && Array.isArray(channel_types) && channel_types.length > 0) {
+    channels = channels.filter(c => channel_types.includes(c.channel_type));
+  }
   if (channels.length === 0) return [];
 
   const results = [];
@@ -211,7 +217,7 @@ async function dispatchAlertPushes(alertRecord, rule = null) {
       const r = await sendPush(ch, alertRecord, rule, false);
       results.push(r);
     } catch (e) {
-      results.push({ channel_id: ch.id, channel_name: ch.channel_name, status: 'failed', error_message: e.message });
+      results.push({ channel_id: ch.id, channel_name: ch.channel_name, channel_type: ch.channel_type, status: 'failed', error_message: e.message });
     }
   }
   return results;

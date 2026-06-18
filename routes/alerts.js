@@ -299,6 +299,89 @@ router.get('/statistics/department-dashboard', (req, res) => {
   }
 });
 
+router.get('/statistics/department-dashboard/export', (req, res) => {
+  try {
+    const { department, start_time, end_time, format = 'json' } = req.query;
+    const dashboard = AlertModel.getDepartmentDashboard({ department, start_time, end_time });
+    const statusLabelMap = {
+      pending: '待处理', notified: '已通知', processing: '处理中',
+      verified_normal: '核实正常', plan_activated: '已启动预案',
+      false_alarm: '误报', closed: '已办结'
+    };
+    const callbackLabelMap = {
+      contacted: '已联系', onsite: '已到场', normal: '现场正常',
+      plan: '启动预案', escalated: '已升级', false_alarm: '误报', closed: '已办结'
+    };
+    const rows = [];
+    for (const d of dashboard.departments) {
+      const alerts = d.latest_alerts || [];
+      const topAlert = alerts[0] || null;
+      rows.push({
+        责任部门: d.department,
+        告警总数: d.total_count,
+        待处理: d.status_counts.pending,
+        已通知: d.status_counts.notified,
+        处理中: d.status_counts.processing,
+        已启动预案: d.status_counts.plan_activated,
+        核实正常: d.status_counts.verified_normal,
+        误报: d.status_counts.false_alarm,
+        已办结: d.status_counts.closed,
+        未闭环数: d.unclosed_count,
+        已办结数: d.closed_count,
+        最近告警: topAlert ? topAlert.rule_name || '' : '',
+        最近告警状态: topAlert ? (statusLabelMap[topAlert.status] || topAlert.status) : '',
+        最近告警等级: topAlert ? (LEVEL_NAMES[topAlert.alert_level] || topAlert.alert_level) : '',
+        最近回填状态: topAlert && topAlert.last_callback_status ? (callbackLabelMap[topAlert.last_callback_status] || topAlert.last_callback_status) : '',
+        最近回填时间: topAlert ? (topAlert.last_callback_time || '') : '',
+        最近回填操作人: topAlert ? (topAlert.last_callback_operator || '') : '',
+        最后推送状态: topAlert ? (topAlert.last_push_status || '') : '',
+        最后推送错误: topAlert ? (topAlert.last_push_error || '') : '',
+        最后推送时间: topAlert ? (topAlert.last_push_at || '') : '',
+        下一次允许催办时间: topAlert ? (topAlert.next_nudge_at || '') : ''
+      });
+    }
+
+    const filters = dashboard.filters || {};
+    const ts = Date.now();
+
+    if (format === 'csv') {
+      const headers = Object.keys(rows[0] || {
+        责任部门: '', 告警总数: 0, 待处理: 0, 已通知: 0, 处理中: 0,
+        已启动预案: 0, 核实正常: 0, 误报: 0, 已办结: 0, 未闭环数: 0,
+        已办结数: 0, 最近告警: '', 最近告警状态: '', 最近告警等级: '',
+        最近回填状态: '', 最近回填时间: '', 最近回填操作人: '', 最后推送状态: '',
+        最后推送错误: '', 最后推送时间: '', 下一次允许催办时间: ''
+      });
+      const csv = [headers.join(',')].concat(
+        rows.map(r => headers.map(h => {
+          let v = r[h];
+          if (v === null || v === undefined) v = '';
+          v = String(v).replace(/"/g, '""');
+          return `"${v}"`;
+        }).join(','))
+      ).join('\r\n');
+      const bom = '\uFEFF';
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="department_dashboard_${ts}.csv"`);
+      res.send(bom + csv);
+    } else {
+      res.json({
+        code: 0,
+        message: 'success',
+        data: {
+          filters: filters,
+          total_departments: dashboard.total_departments,
+          total_unclosed: dashboard.total_unclosed,
+          rows: rows
+        }
+      });
+    }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ code: 500, message: e.message });
+  }
+});
+
 router.get('/:id(\\d+)', (req, res) => {
   try {
     const alert = AlertModel.getById(parseInt(req.params.id, 10));

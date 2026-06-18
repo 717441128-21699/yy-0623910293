@@ -149,7 +149,7 @@ async function processMessage(message, pushHook, options) {
       if (alertRecord) {
         var newLevel = upgradeLevel(prevLevel, rule.alert_level);
         if (newLevel !== prevLevel) {
-          alertRecord = AlertModel.updateStatus(alertRecord.id, newLevel);
+          alertRecord = AlertModel.updateAlertLevel(alertRecord.id, newLevel);
           alertRecord.alert_level = newLevel;
           wasUpgraded = true;
         }

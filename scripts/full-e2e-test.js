@@ -28,6 +28,36 @@ function jsonRequest(method, path, body) {
   });
 }
 
+function binaryRequest(method, path, body) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(BASE + path);
+    const payload = body ? JSON.stringify(body) : null;
+    const headers = {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Accept': '*/*'
+    };
+    if (payload) headers['Content-Length'] = Buffer.byteLength(payload, 'utf8');
+    const req = http.request({
+      hostname: url.hostname, port: url.port, path: url.pathname + url.search,
+      method, headers, timeout: 10000
+    }, (res) => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode,
+          contentType: res.headers['content-type'],
+          disposition: res.headers['content-disposition'],
+          size: d.length
+        });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
 function hr(title) {
   console.log('\n========== ' + title + ' ==========');
 }
@@ -414,6 +444,94 @@ async function main() {
   });
   const reopenTriggered = afterReopen.body.data.trigger_details.some(t => t.passed_threshold && !t.suppressed);
   console.log('  reopen 后立即接入相似内容:', reopenTriggered ? '✓ 正常触发（未静默）' : '✗ 被静默（异常）');
+
+  hr('35. 告警升级 - 真正修改 alert_level（不改处置状态）');
+  const beforeEsc = await jsonRequest('GET', '/api/alerts/' + latestAlertId);
+  const beforeLevel = beforeEsc.body.data.alert_level;
+  const beforeStatus = beforeEsc.body.data.status;
+  console.log('  升级前 level=', beforeLevel, 'status=', beforeStatus);
+  const escLevel = await jsonRequest('POST', '/api/escalations/manual', {
+    alert_id: latestAlertId,
+    reason: '测试等级升级（不改状态）',
+    to_level: 'emergency',
+    channel_ids: [],
+    only_push_selected: false
+  });
+  const afterEsc = await jsonRequest('GET', '/api/alerts/' + latestAlertId);
+  const afterLevel = afterEsc.body.data.alert_level;
+  const afterStatus = afterEsc.body.data.status;
+  console.log('  升级后 level=', afterLevel, 'status=', afterStatus,
+    '(level变更=', beforeLevel !== afterLevel ? '✓ 已改' : '✗ 未改',
+    '/ 状态变更=', beforeStatus !== afterStatus ? '✗ 被改了' : '✓ 未改' + ')');
+
+  hr('36. 告警升级 - 指定通道（只发短信/领导接口通道）');
+  const escChannels = await jsonRequest('POST', '/api/escalations/manual', {
+    alert_id: latestAlertId,
+    reason: '测试定向推送：只发领导短信接口',
+    channel_types: ['sms'],
+    only_push_selected: true
+  });
+  const pushes = escChannels.body.data.push_results || [];
+  const pushedTypes = pushes.map(p => p.channel_type).filter(Boolean);
+  console.log('  指定 channel_types=[sms]，实际推送通道类型=', pushedTypes,
+    '(全部是 sms:', pushedTypes.every(t => t === 'sms') ? '✓' : '✗' + ')');
+
+  hr('37. 告警详情 - 含完整升级轨迹（每次的等级/原因/结果）');
+  const detailWithEsc = await jsonRequest('GET', '/api/alerts/' + latestAlertId);
+  const escList = detailWithEsc.body.data.escalations || [];
+  console.log('  升级轨迹条数:', escList.length);
+  escList.forEach(e => {
+    console.log(`    #${e.id} ${e.from_level}→${e.to_level} type=${e.escalation_type} reason=${(e.reason || '').substring(0, 30)} result=${e.result_status}`);
+  });
+
+  hr('38. 部门台账导出 - JSON/CSV 双格式');
+  const dashJson = await jsonRequest('GET', '/api/alerts/statistics/department-dashboard/export?department=' + encodeURIComponent('游客服务中心') + '&format=json');
+  console.log('  JSON 导出: total_departments=', dashJson.body.data.total_departments,
+    'total_unclosed=', dashJson.body.data.total_unclosed,
+    'rows=', dashJson.body.data.rows.length,
+    '首行部门=', dashJson.body.data.rows[0] ? dashJson.body.data.rows[0]['责任部门'] : '无');
+  const dashCsv = await binaryRequest('GET', '/api/alerts/statistics/department-dashboard/export?format=csv');
+  console.log('  CSV 导出: HTTP=', dashCsv.status, 'content-type=', dashCsv.contentType, 'disposition=', dashCsv.disposition);
+
+  hr('39. 班后复盘 - 按班次统计 + 自动生成摘要');
+  // 先创建一个班次并交班
+  const sh = await jsonRequest('POST', '/api/shifts', {
+    shift_name: '测试复盘早班',
+    shift_type: 'morning',
+    handover_person: '测试员A',
+    successor_person: '测试员B',
+    notes: '重点关注儿童走失类告警'
+  });
+  const shId = sh.body.data.id;
+  await jsonRequest('POST', '/api/shifts/' + shId + '/handover', { successor_person: '测试员B' });
+  // 查班后复盘
+  const review = await jsonRequest('GET', '/api/escalations/shift-review/' + shId);
+  const r = review.body.data;
+  console.log('  班次:', r.shift.name, r.shift.type_label);
+  console.log('  新增告警:', r.new_alerts, '升级次数:', r.escalations.total, '(自动', r.escalations.auto_count, '/手动', r.escalations.manual_count + ')');
+  console.log('  最慢部门:', r.slowest_departments.length ? r.slowest_departments[0].department + '(' + r.slowest_departments[0].avg_callback_minutes + '分钟)' : '无数据');
+  console.log('  推送失败最多:', r.failed_pushes.length ? r.failed_pushes[0].channel_name + '(' + r.failed_pushes[0].failed_count + '次)' : '无失败');
+  console.log('  未闭环总计:', r.unclosed.total, '部门数:', r.unclosed.by_department.length);
+  const summaryLines = r.summary_text.split('\n').slice(0, 5);
+  console.log('  自动摘要预览:');
+  summaryLines.forEach(line => console.log('    ' + line));
+
+  hr('40. 告警列表 / 部门台账等级一致 - 升级后同步');
+  // 列表里同一条告警的等级
+  const listCheck = await jsonRequest('GET', '/api/alerts?page=1&pageSize=5');
+  const listAlert = listCheck.body.data.list.find(a => a.id === latestAlertId);
+  const dashCheck = await jsonRequest('GET', '/api/alerts/statistics/department-dashboard');
+  const dashDept = dashCheck.body.data.departments.find(d => d.department.includes('游客服务中心'));
+  const dashTopLevel = dashDept && dashDept.latest_alerts && dashDept.latest_alerts[0] ? dashDept.latest_alerts[0].alert_level : null;
+  console.log('  告警详情等级=', afterLevel, '| 列表等级=', listAlert ? listAlert.alert_level : '无', '| 台账最新等级=', dashTopLevel,
+    '三者一致:', afterLevel === (listAlert ? listAlert.alert_level : null) && afterLevel === dashTopLevel ? '✓' : '✗');
+
+  hr('41. 升级目标选项字典 - 等级/通道类型/可用通道');
+  const opts = await jsonRequest('GET', '/api/escalations/target-options');
+  console.log('  等级选项数:', opts.body.data.level_options.length,
+    ' 通道类型选项数:', opts.body.data.channel_type_options.length,
+    ' 可用通道组数:', Object.keys(opts.body.data.channels).length,
+    '(含:', Object.keys(opts.body.data.channels).join('/') + ')');
 
   hr('全部验证通过 ✓');
   process.exit(0);

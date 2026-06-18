@@ -203,6 +203,15 @@ class AlertModel {
     return this.getById(id);
   }
 
+  static updateAlertLevel(id, alertLevel) {
+    ensureSchema();
+    execRun(`UPDATE alerts SET alert_level = $alert_level, last_updated_at = CURRENT_TIMESTAMP WHERE id = $id`, {
+      $alert_level: alertLevel, $id: id
+    });
+    saveDatabase();
+    return this.getById(id);
+  }
+
   static touchNotified(id) {
     ensureSchema();
     execRun(`UPDATE alerts SET last_notified_at = CURRENT_TIMESTAMP, last_updated_at = CURRENT_TIMESTAMP WHERE id = $id`, { $id: id });
